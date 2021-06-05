@@ -1,108 +1,88 @@
-distmatrix <- function(date, type="mindist", tolerance=0.1, useGW=T) {
+##' Generate between-country distance matrix on the CShapes dataset
+##'
+##' This function returns between-country distances in km for the given date. Output format is a distance matrix that lists distances between each pair of countries.
+##' The function can compute different types of distance lists, specified by the \code{type} parameter:
+##' \enumerate{
+##'   \item Capital distances
+##'   \item Centroid distances
+##'   \item Minimum distances between polygons
+##' }
+##' The latter computation is very expensive if polygons consist of many points.
+##' For that reason, the function simplifies the country polygons according to the Douglas-Peucker algorithm
+##' (http://en.wikipedia.org/wiki/Ramer-Douglas-Peucker_algorithm), which eliminates points from the polygons and speeds up computation.
+##' The \code{keep} parameter specifies the proportion of points to retain in the simplified country polygons.
+##'
+##' @param date The date for which the distance matrix should be computed. This argument must be of type Date and must be in the range 1/1/1886 - end of the dataset.
+##' @param type Specifies the type of distance matrix: "capdist" for capital distances, "centdist" for centroid distances, and "mindist" for minimum distances.
+##' @param keep Proportion of points to retain following polygon simplification using Douglas-Peucker algorithm. Default: 0.1. See package \code{rmapshaper}.
+##' @param useGW Boolean argument specifying the system membership coding. TRUE: Gleditsch and Ward (GW, default). FALSE: Correlates of War (COW).
+##' @param dependencies Boolean argument specifying whether dependent territories must be included. TRUE: Returns polygons for both independent states and dependent units. FALSE: Returns polygons for indepdendent states only (default).
+##' @return A quadratic weights matrix, with the row and column labels containing the country identifiers in the specified coding system (COW or GW).
+##'
+##' @importFrom rmapshaper ms_simplify
+##' @export
 
-  # check input
-  if (!inherits(date, "Date")) {
+distmatrix <- function(date, type = "mindist", keep = 0.1, useGW = TRUE, dependencies = FALSE){
+
+  ## Errors and warnings
+  if (!is.na(date) && !inherits(date, "Date")) {
     stop("date is not of type Date")
   }
-  
-  if (date < as.Date("1946-1-1") | date > as.Date("2016-6-30")) {
+
+  if (!is.na(date) && (date < as.Date("1886-01-01") |
+                         date > as.Date("2019-12-31"))) {
     stop("Specified date is out of range")
   }
-  
+
   if (!(type %in% c("mindist", "capdist", "centdist"))) {
-  	stop("Wrong type argument. Possible values: mindist, capdist, centdist")
+    stop("Wrong type argument. Possible values: mindist, capdist, centdist")
   }
-  
-  if (tolerance<0) {
-  	stop("Tolerance must be >=0")
+
+  if (keep <= 0){
+    warning("Douglas Peucker simplification algorithm: \n
+    'keep' (proportion of points to retain) must be > 0")
   }
-  
-  # where to look for the dataset
-  path <- paste(system.file(package = "cshapes"), "shp/cshapes.shp", sep="/")
-  
-  # load the dataset
-  cshp.full <- readShapePoly(path, proj4string=CRS("+proj=longlat +ellps=WGS84"), IDvar="FEATUREID")
-    
-  # select all relevant polygons
-  if (useGW) {
-    cshp.full <- cshp.full[cshp.full$GWCODE>=0,]
-    startdate <- as.Date(paste(cshp.full$GWSYEAR, cshp.full$GWSMONTH, cshp.full$GWSDAY, sep="-"))
-    enddate <- as.Date(paste(cshp.full$GWEYEAR, cshp.full$GWEMONTH, cshp.full$GWEDAY, sep="-"))
+
+  ## Call cshp function (COW or GW)
+  cshp.part <- cshp(date, useGW = useGW, dependencies = dependencies)
+
+  ## Get vector of all country codes
+  if ("gwcode" %in% names(cshp.part)){
+    ccodes <- cshp.part$gwcode
   } else {
-    cshp.full <- cshp.full[cshp.full$COWCODE>=0,]
-    startdate <- as.Date(paste(cshp.full$COWSYEAR, cshp.full$COWSMONTH, cshp.full$COWSDAY, sep="-"))
-    enddate <- as.Date(paste(cshp.full$COWEYEAR, cshp.full$COWEMONTH, cshp.full$COWEDAY, sep="-"))
-  }	
-  cshp.full <- cshp.full[!is.na(startdate) & !is.na(enddate),]
-  startdate <- startdate[!is.na(startdate)]
-  enddate <- enddate[!is.na(enddate)]
-  cshp.part <- cshp.full[startdate <= date & enddate >= date,]
-  
-  # compute pairwise distances
-  if (useGW) {
-    cshp.part <- cshp.part[order(cshp.part$GWCODE),]
-    ccodes <- cshp.part$GWCODE
-  } else {
-    cshp.simple <- cshp.part[order(cshp.part$COWCODE),]
-    ccodes <- cshp.part$COWCODE
+    ccodes <- cshp.part$cowcode
   }
-    
-  resultmatrix <- matrix(0, nrow=length(ccodes), ncol=length(ccodes))
-  colnames(resultmatrix) <- ccodes
-  rownames(resultmatrix) <- ccodes
-  
-  if (type=="mindist") {
-    
-    # simplify the polygons
-    cshp.simple <- thinnedSpatialPoly(cshp.part, tolerance, minarea=0, avoidGEOS=T)
-    
-    for (c1 in 1:(length(ccodes)-1)) {
-      for (c2 in (c1+1):length(ccodes)) {
-        
-        # compute distance
-        dist <- cshp.mindist(cshp.simple[c1,], cshp.simple[c2,])
-        resultmatrix[c1,c2] <- dist
-        resultmatrix[c2,c1] <- dist 
+
+  ## Minimal distance between polygons
+  if (type == "mindist"){
+    cshp.simple <- rmapshaper::ms_simplify(cshp.part, keep_shapes=T, keep=0.1,
+                               method = "dp",  snap=T)
+    resultmatrix <- matrix(0, nrow = length(ccodes), ncol = length(ccodes))
+
+    for (c1 in 1:(length(ccodes) - 1)) {
+      for (c2 in (c1 + 1):length(ccodes)) {
+        pt1 <- suppressMessages(sf::st_coordinates(cshp.simple[c1,])[,c("X", "Y")])
+        pt2 <- suppressMessages(sf::st_coordinates(cshp.simple[c2,])[,c("X", "Y")])
+        dist <- suppressMessages(min(sp::spDists(pt1, pt2, longlat=TRUE)))
+        resultmatrix[c1, c2] <- dist
+        resultmatrix[c2, c1] <- dist
       }
     }
+
+    ## Capital distance
+  } else if (type == "capdist"){
+    pts <- as.matrix(sf::st_drop_geometry(cshp.part)[,c("caplong", "caplat")])
+    resultmatrix <- sp::spDists(pts, pts, longlat=TRUE)
+
+    ## Centroid distance
   } else {
-    
-    for (c1 in 1:(length(ccodes)-1)) {
-      for (c2 in (c1+1):length(ccodes)) {
-  
-        if (type=="capdist") {
-          dist <- cshp.capdist(cshp.part[c1,], cshp.part[c2,])
-        }
-        if (type=="centdist") {
-          dist <- cshp.centdist(cshp.part[c1,], cshp.part[c2,])
-        }
-        
-        resultmatrix[c1,c2] <- dist
-        resultmatrix[c2,c1] <- dist
-      }
-    }    
+    pts <- as.matrix(sf::st_coordinates(suppressWarnings(sf::st_centroid(cshp.part))))
+    resultmatrix <- sp::spDists(pts, pts, longlat=TRUE)
   }
-  resultmatrix
+
+  ## Assign country codes to matrix rows and columns
+  colnames(resultmatrix) <- ccodes
+  rownames(resultmatrix) <- ccodes
+  return(resultmatrix)
 }
 
-cshp.mindist <- function(polygon1, polygon2) {
-  
-  # create matrices containing all points of the polygons
-  p1 <- ldply(polygon1@polygons[[1]]@Polygons, function(y) {y@coords})
-  p2 <- ldply(polygon2@polygons[[1]]@Polygons, function(y) {y@coords})
-  
-  # use spDists function to compute distances between all pairs of points
-  min(spDists(as.matrix(p1), as.matrix(p2), longlat=T))
-}
-
-cshp.centdist <- function(polygon1, polygon2) {
-  
-  # use spDists function to compute distances between centroids
-  spDistsN1(coordinates(polygon1), coordinates(polygon2), longlat=T)
-}
-
-cshp.capdist <- function(polygon1, polygon2) {
-  
-  # use spDists function to compute distances between centroids
-  spDistsN1(matrix(c(polygon1$CAPLONG, polygon1$CAPLAT), ncol=2), matrix(c(polygon2$CAPLONG, polygon2$CAPLAT), ncol=2), longlat=T)
-}
